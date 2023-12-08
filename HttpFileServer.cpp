@@ -28,8 +28,9 @@
 using namespace std::string_literals;
 namespace fs = std::filesystem;
 
-#define http_response_msg(code, msg) "HTTP/1.1 " #code " " ##msg "\r\n\r\n<html>" ##msg "</html>"
-#define http_response_send(sock, str) send(sock, str.c_str(), static_cast<int>(str.size()), 0)
+std::string http_response_msg(uint16_t code, std::string msg){
+    return "HTTP/1.1 "s + std::to_string(code) + " "s + msg + "\r\n\r\n<html>"s + msg + "</html>"s;
+}
 
 // constants.
 constexpr uint32_t HTTP_RECV_BUFFER_LEN = 8192;
@@ -277,6 +278,10 @@ class HttpConnection {
         uri = decodeUri;
     }
 
+    void http_response_send(const std::string& response){
+        send(sock, response.c_str(), static_cast<int>(response.size()), 0);
+    }
+
     void serve_file(const fs::path& p) {
         auto extension = p.extension().string();
         auto iter = HTTP_MIME_TABLE.find(extension);
@@ -304,7 +309,7 @@ class HttpConnection {
             send(sock, content.c_str(), static_cast<int>(content.size()), 0);
         }
         else {
-            http_response_send(sock, HTTP_404_NOT_FOUND);
+            http_response_send(HTTP_404_NOT_FOUND);
         }
     }
 
@@ -394,7 +399,7 @@ public:
 
         if (len < 0) {
             std::cerr << "recv() failed " << build_last_error() << "\n";
-            http_response_send(sock, HTTP_500_INTERNAL_SERVER_ERROR);
+            http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
         }
         else if (len == 0) {
             std::cerr << "Connection has been closed, nothing would do.\n";
@@ -404,33 +409,33 @@ public:
 
             // request too large or it is not a valid http request.
             if ((index = buf.find("\r\n\r\n")) == std::string::npos) {
-                http_response_send(sock, HTTP_500_INTERNAL_SERVER_ERROR);
+                http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
                 return;
             }
 
             // RFC 2616: parse the first line.
             // 1st space not detected, this is not a valid http request.
             if ((index = buf.find(" ")) == std::string::npos) {   
-                http_response_send(sock, HTTP_500_INTERNAL_SERVER_ERROR);
+                http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
                 return;
             }
 
             method = buf.substr(0, index);
             if (string_to_upper(method) != "GET") {
-                http_response_send(sock, HTTP_405_METHOD_NOT_ALLOWED);
+                http_response_send(HTTP_405_METHOD_NOT_ALLOWED);
                 return;
             }
 
             // 2nd space not detected, this is not a valid http request.
             size_t indexBegin = index + 1;
             if ((index = buf.find(" ", indexBegin)) == std::string::npos) {   
-                http_response_send(sock, HTTP_500_INTERNAL_SERVER_ERROR);
+                http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
                 return;
             }
 
             uri = buf.substr(indexBegin, index - indexBegin);
             if (uri.size() > HTTP_URI_MAX_LEN) {   // uri too long.
-                http_response_send(sock, HTTP_414_URI_TOO_LONG);
+                http_response_send(HTTP_414_URI_TOO_LONG);
                 return;
             }
 
@@ -450,7 +455,7 @@ public:
                 serve_file(p);
             }
             else {   // not directory or file are considered as not found.
-                http_response_send(sock, HTTP_404_NOT_FOUND);
+                http_response_send(HTTP_404_NOT_FOUND);
             }
         }
     }
