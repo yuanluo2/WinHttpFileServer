@@ -80,6 +80,18 @@ static std::wstring conv_ascii_to_unicode(const std::string& str) {
         throw_last_error("conv_ascii_to_unicode() failed");
     }
 
+    /*
+    * a very tricky thing here is, if the underlying string stored in fs::path <p> ends with '\0', 
+    * when you pass the <p> to the fs::directory_iterator, you would get a file not found exception.
+    * but if I pass <p.c_str()> to the fs::directory_iterator, then that will work as expected. I tested it on
+    * the visual studio and clang++, and both represent this bug, but '\0' doesn't influence the functions like
+    * fs::is_directory or fs::is_regular_file, so this is really interesting.
+    * 
+    * This function and the functions below are all doing the encoding conversion,
+    * and all of the <len> used in the functions contains '\0', to prevent the tricky behaviour like fs::directory_iterator,
+    * we resize the buffer to ignore the tail '\0'.
+    */
+    buffer.resize(len - 1);
     return buffer;
 }
 
@@ -95,6 +107,7 @@ static std::string conv_unicode_to_ascii(const std::wstring& wstr) {
         throw_last_error("conv_unicode_to_ascii() failed");
     }
 
+    buffer.resize(len - 1);   // same reason as std::wstring conv_ascii_to_unicode(const std::string& str);
     return buffer;
 }
 
@@ -110,6 +123,7 @@ static std::wstring conv_utf8_to_unicode(const std::string& str) {
         throw_last_error("conv_utf8_to_unicode() failed");
     }
 
+    buffer.resize(len - 1);   // same reason as std::wstring conv_ascii_to_unicode(const std::string& str);
     return buffer;
 }
 
@@ -329,17 +343,11 @@ class HttpConnection {
     }
 
     void serve_dir(const fs::path& p) {
-        /*
-        * a very tricky thing here is, if you pass the p to the fs::directory_iterator,
-        * you would get a file not found exception, cause the underlying string stored in p ends with L'\0'.
-        * but if I use p.c_str() here, then this will work as expected. 
-        * this seems really like a bug.
-        */
         std::string response = "HTTP/1.1 200 OK\r\nServer: Miku Server\r\nConnection: close\r\n";
         std::string body = "<html><header><h1>Miku Server</h1></header><body>";
         body += "Current dir: " + conv_unicode_to_utf8(p.wstring()) + "<br><br>";
         
-        for (const auto& entry : fs::directory_iterator(p.c_str(), fs::directory_options::skip_permission_denied)) {
+        for (const auto& entry : fs::directory_iterator(p, fs::directory_options::skip_permission_denied)) {
             /*
             * It is necessary to use Unicode to process paths on the Windows platform, 
             * while for HTML pages, we use UTF-8.
