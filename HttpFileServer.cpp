@@ -28,7 +28,7 @@
 using namespace std::string_literals;
 namespace fs = std::filesystem;
 
-std::string http_response_msg(uint16_t code, std::string msg){
+static std::string http_response_msg(uint16_t code, std::string msg) {
     return "HTTP/1.1 "s + std::to_string(code) + " "s + msg + "\r\n\r\n<html>"s + msg + "</html>"s;
 }
 
@@ -74,19 +74,19 @@ static std::wstring conv_ascii_to_unicode(const std::string& str) {
         throw_last_error("conv_ascii_to_unicode() failed");
     }
 
-    std::wstring buffer(len, wchar_t{});   
+    std::wstring buffer(len, wchar_t{});
     len = MultiByteToWideChar(CP_ACP, 0, str.c_str(), -1, &buffer[0], len);
     if (len == 0) {
         throw_last_error("conv_ascii_to_unicode() failed");
     }
 
     /*
-    * a very tricky thing here is, if the underlying string stored in fs::path <p> ends with '\0', 
+    * a very tricky thing here is, if the underlying string stored in fs::path <p> ends with '\0',
     * when you pass the <p> to the fs::directory_iterator, you would get a file not found exception.
     * but if I pass <p.c_str()> to the fs::directory_iterator, then that will work as expected. I tested it on
     * the visual studio and clang++, and both represent this bug, but '\0' doesn't influence the functions like
     * fs::is_directory or fs::is_regular_file, so this is really interesting.
-    * 
+    *
     * This function and the functions below are all doing the encoding conversion,
     * and all of the <len> used in the functions contains '\0', to prevent the tricky behaviour like fs::directory_iterator,
     * we resize the buffer to ignore the tail '\0'.
@@ -169,7 +169,7 @@ static std::string conv_unicode_to_utf8(const std::wstring& wstr) {
 }
 
 static std::string string_to_upper(std::string str) {
-    for (size_t i = 0; i < str.size();++i) {
+    for (size_t i = 0; i < str.size(); ++i) {
         str[i] = toupper(str[i]);
     }
 
@@ -292,7 +292,7 @@ class HttpConnection {
         uri = decodeUri;
     }
 
-    void http_response_send(const std::string& response){
+    void http_response_send(const std::string& response) {
         send(sock, response.c_str(), static_cast<int>(response.size()), 0);
     }
 
@@ -313,12 +313,12 @@ class HttpConnection {
             std::stringstream buffer;
             buffer << file.rdbuf();
             std::string content = buffer.str();
-            
+
             std::string response = "HTTP/1.1 200 OK\r\nServer: Miku Server\r\nConnection: close\r\n";
             response += "Content-Type: " + contentType + "\r\n";
             response += "Content-Length: " + std::to_string(content.size()) + "\r\n";
             response += "\r\n";
-         
+
             send(sock, response.c_str(), static_cast<int>(response.size()), 0);
             send(sock, content.c_str(), static_cast<int>(content.size()), 0);
         }
@@ -346,10 +346,10 @@ class HttpConnection {
         std::string response = "HTTP/1.1 200 OK\r\nServer: Miku Server\r\nConnection: close\r\n";
         std::string body = "<html><header><h1>Miku Server</h1></header><body>";
         body += "Current dir: " + conv_unicode_to_utf8(p.wstring()) + "<br><br>";
-        
+
         for (const auto& entry : fs::directory_iterator(p, fs::directory_options::skip_permission_denied)) {
             /*
-            * It is necessary to use Unicode to process paths on the Windows platform, 
+            * It is necessary to use Unicode to process paths on the Windows platform,
             * while for HTML pages, we use UTF-8.
             */
             std::string name = conv_unicode_to_utf8(entry.path().filename().wstring());
@@ -361,25 +361,85 @@ class HttpConnection {
                 body += "<a href='" + name + "'>" + name + "</a>   " + build_file_size(fs::file_size(entry)) + " <br>";
             }
         }
-        
+
         body += "</body></html>";
         response += "Content-Type: text/html; charset=utf-8\r\n";
         response += "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
         response += body;
-        
+
         send(sock, response.c_str(), static_cast<int>(response.size()), 0);
     }
+
+    void analyse() {
+        size_t index = 0;
+
+        // request too large or it is not a valid http request.
+        if ((index = buf.find("\r\n\r\n")) == std::string::npos) {
+            http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
+            return;
+        }
+
+        // RFC 2616: parse the first line.
+        // 1st space not detected, this is not a valid http request.
+        if ((index = buf.find(" ")) == std::string::npos) {
+            http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
+            return;
+        }
+
+        method = buf.substr(0, index);
+        if (string_to_upper(method) != "GET") {
+            http_response_send(HTTP_405_METHOD_NOT_ALLOWED);
+            return;
+        }
+
+        // 2nd space not detected, this is not a valid http request.
+        size_t indexBegin = index + 1;
+        if ((index = buf.find(" ", indexBegin)) == std::string::npos) {
+            http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
+            return;
+        }
+
+        uri = buf.substr(indexBegin, index - indexBegin);
+        if (uri.size() > HTTP_URI_MAX_LEN) {   // uri too long.
+            http_response_send(HTTP_414_URI_TOO_LONG);
+            return;
+        }
+
+        fs::path p{ rootPath };
+        uri_decode();   // decode the percent-encoding.
+
+        if (uri != "/") {   // if uri is not '/', concatenate the path.
+            p /= conv_utf8_to_unicode(uri);   // It is necessary to use Unicode to process paths on the Windows platform.
+        }
+
+        std::cout << conv_unicode_to_ascii(p.wstring()) << "\n";
+
+        if (fs::is_directory(p)) {
+            serve_dir(p);
+        }
+        else if (fs::is_regular_file(p)) {
+            serve_file(p);
+        }
+        else {   // not directory or file are considered as not found.
+            http_response_send(HTTP_404_NOT_FOUND);
+        }
+    }
 public:
-    HttpConnection(SOCKET _sock, const std::string& _rootPath) : 
-        sock{ _sock }, 
-        rootPath{ conv_ascii_to_unicode(_rootPath) }, 
-        buf(HTTP_RECV_BUFFER_LEN, char{}) 
+    HttpConnection(SOCKET _sock, const std::string& _rootPath) :
+        sock{ _sock },
+        rootPath{ conv_ascii_to_unicode(_rootPath) },
+        buf(HTTP_RECV_BUFFER_LEN, char{})
     {}
 
     ~HttpConnection() {
         if (sock != INVALID_SOCKET) {
-            shutdown(sock, SD_SEND);   // half close.
-            closesocket(sock);
+            if (shutdown(sock, SD_SEND) != 0) {   // half close.
+                std::cerr << "error shutdown(), " << build_last_error() << "\n";
+            }
+
+            if (closesocket(sock) != 0) {
+                std::cerr << "error closesocket(), " << build_last_error() << "\n";
+            }
         }
     }
 
@@ -400,7 +460,8 @@ public:
         // set receive time out.
         uint32_t recvTimeOut = HTTP_RECV_TIMEOUT_SEC * 1000;
         if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeOut), sizeof(recvTimeOut)) != 0) {
-            throw_last_error("setsockopt() SO_RCVTIMEO failed");
+            std::cerr << "setsockopt() SO_RCVTIMEO failed, " << build_last_error() << "\n";
+            return;
         }
 
         auto len = recv(sock, &buf[0], HTTP_RECV_BUFFER_LEN, 0);
@@ -413,104 +474,73 @@ public:
             std::cerr << "Connection has been closed, nothing would do.\n";
         }
         else {
-            size_t index = 0;
-
-            // request too large or it is not a valid http request.
-            if ((index = buf.find("\r\n\r\n")) == std::string::npos) {
-                http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
-                return;
-            }
-
-            // RFC 2616: parse the first line.
-            // 1st space not detected, this is not a valid http request.
-            if ((index = buf.find(" ")) == std::string::npos) {   
-                http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
-                return;
-            }
-
-            method = buf.substr(0, index);
-            if (string_to_upper(method) != "GET") {
-                http_response_send(HTTP_405_METHOD_NOT_ALLOWED);
-                return;
-            }
-
-            // 2nd space not detected, this is not a valid http request.
-            size_t indexBegin = index + 1;
-            if ((index = buf.find(" ", indexBegin)) == std::string::npos) {   
-                http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
-                return;
-            }
-
-            uri = buf.substr(indexBegin, index - indexBegin);
-            if (uri.size() > HTTP_URI_MAX_LEN) {   // uri too long.
-                http_response_send(HTTP_414_URI_TOO_LONG);
-                return;
-            }
-
-            fs::path p{ rootPath };
-            uri_decode();   // decode the percent-encoding.
-
-            if (uri != "/") {   // if uri is not '/', concatenate the path.
-                p /= conv_utf8_to_unicode(uri);   // It is necessary to use Unicode to process paths on the Windows platform.
-            }
-
-            std::cout << conv_unicode_to_ascii(p.wstring()) << "\n";
-
-            if (fs::is_directory(p)) {
-                serve_dir(p);
-            }
-            else if (fs::is_regular_file(p)) {
-                serve_file(p);
-            }
-            else {   // not directory or file are considered as not found.
-                http_response_send(HTTP_404_NOT_FOUND);
-            }
+            analyse();
         }
     }
 };
 
-static SOCKET create_http_server_socket(const std::string& ip, uint16_t port) {
-    // parse ip address.
-    struct sockaddr_in addr_in {};
-    auto ret = inet_pton(AF_INET, ip.c_str(), &(addr_in.sin_addr));
+class HttpFileServer {
+    SOCKET server;
+    ThreadPool pool;
 
-    if (ret < 0) {
-        throw_last_error("inet_pton() failed");
+    void bind_listen(const std::string& ip, uint16_t port) {
+        struct sockaddr_in addr_in {};
+
+        addr_in.sin_family = AF_INET;
+        addr_in.sin_port = htons(port);   // host byte order to network byte order.
+        auto ret = inet_pton(AF_INET, ip.c_str(), &(addr_in.sin_addr));
+
+        if (ret < 0) {
+            throw_last_error("error inet_pton()");
+        }
+        else if (ret == 0) {
+            throw std::runtime_error{ "given ip is not a valid IPv4 dotted-decimal string or a valid IPv6 address string\n" };
+        }
+
+        if (bind(server, (const struct sockaddr*)(&addr_in), sizeof(struct sockaddr_in)) != 0) {
+            throw_last_error("error bind()");
+        }
+
+        if (listen(server, SOMAXCONN) != 0) {
+            throw_last_error("error listen()");
+        }
+
+        int option = 1;
+        if (setsockopt(server, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&option), sizeof(option)) != 0) {
+            throw_last_error("error setsockopt() on SO_REUSEADDR");
+        }
     }
-    else if (ret == 0) {
-        throw std::runtime_error{ "given ip is not a valid IPv4 dotted-decimal string or a valid IPv6 address string\n" };
+public:
+    HttpFileServer() {
+        server = socket(AF_INET, SOCK_STREAM, 0);
+        if (server == INVALID_SOCKET) {
+            throw_last_error("error socket()");
+        }
     }
 
-    addr_in.sin_family = AF_INET;
-    addr_in.sin_port = htons(port);   // host byte order to network byte order.
-
-    // create socket.
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == INVALID_SOCKET) {
-        throw_last_error("socket() failed");
+    ~HttpFileServer() {
+        if (server != INVALID_SOCKET) {
+            if (closesocket(server) != 0) {
+                std::cerr << "error closesocket(), " << build_last_error() << "\n";
+            }
+        }
     }
 
-    // bind ip and port.
-    if (bind(sock, (const struct sockaddr*)(&addr_in), sizeof(struct sockaddr_in)) != 0) {
-        closesocket(sock);
-        throw_last_error("bind() failed");
-    }
+    void serve(const std::string& ip, uint16_t port, const std::string& rootPath) {
+        bind_listen(ip, port);
 
-    // listen.
-    if (listen(sock, SOMAXCONN) != 0) {
-        closesocket(sock);
-        throw_last_error("listen() failed");
-    }
+        while (true) {
+            SOCKET s = accept(server, nullptr, nullptr);
+            if (s == INVALID_SOCKET) {
+                std::cerr << "accept() failed, " << build_last_error() << "\n";
+                return;
+            }
 
-    // reuse address.
-    int option = 1;
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&option), sizeof(option)) != 0) {
-        closesocket(sock);
-        throw_last_error("setsockopt() SO_REUSEADDR failed");
+            auto connection = std::make_shared<HttpConnection>(s, rootPath);
+            pool.add_task([connection]() { connection->start(); });
+        }
     }
-
-    return sock;
-}
+};
 
 int main(int argc, char* argv[]) {
     if (argc != 3) {
@@ -525,22 +555,9 @@ int main(int argc, char* argv[]) {
 
     try {
         auto port = static_cast<uint16_t>(std::stoi(argv[1]));
-        auto server = create_http_server_socket("0.0.0.0", port);
-        ThreadPool threadPool;
+        HttpFileServer hfs;
 
-        while (true) {
-            SOCKET s = accept(server, nullptr, nullptr);
-            if (s == INVALID_SOCKET) {
-                std::cerr << "accept() failed, " << build_last_error() << "\n";
-                continue;
-            }
-
-            auto connection = std::make_shared<HttpConnection>(s, argv[2]);
-
-            threadPool.add_task([connection]() {
-                connection->start();
-                });
-        }
+        hfs.serve("0.0.0.0", port, argv[2]);
     }
     catch (const std::invalid_argument& e) {
         std::cerr << e.what() << ", please give a valid port, like 8039, not " << argv[1] << "\n";
@@ -552,5 +569,5 @@ int main(int argc, char* argv[]) {
         std::cerr << e.what() << "\n";
     }
 
-	return 0;
+    return 0;
 }
