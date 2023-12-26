@@ -404,7 +404,7 @@ class HttpConnection {
         send(sock, response.c_str(), static_cast<int>(response.size()), 0);
     }
 
-    void analyse() {
+    void process_request() {
         size_t index = 0;
 
         // request too large or it is not a valid http request.
@@ -494,7 +494,7 @@ public:
             print_user_error("Connection has been closed, nothing would do.\n");
         }
         else {
-            analyse();
+            process_request();
         }
     }
 };
