@@ -4,9 +4,11 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <iostream>
+#include <syncstream>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <ranges>
 #include <memory>
 #include <exception>
 #include <stdexcept>
@@ -28,20 +30,28 @@
 using namespace std::string_literals;
 namespace fs = std::filesystem;
 
-static std::string http_response_msg(uint16_t code, std::string msg) {
-    return "HTTP/1.1 "s + std::to_string(code) + " "s + msg + "\r\n\r\n<html>"s + msg + "</html>"s;
+static std::string build_response_with_http_code(uint16_t code, const std::string& msg){
+    std::string ret;
+    std::string html = "<html><h1>"s + msg + "</h1></html>"s;
+
+    ret += "HTTP/1.1 "s + std::to_string(code) + " "s + msg + "\r\n";
+    ret += "Content-Type: text/html\r\n";
+    ret += "Content-Length: " + std::to_string(html.size()) + "\r\n\r\n";
+    ret += html;
+
+    return ret;
 }
+
+static const std::string HTTP_200_OK = build_response_with_http_code(200, "OK");
+static const std::string HTTP_404_NOT_FOUND = build_response_with_http_code(404, "Not Found");
+static const std::string HTTP_405_METHOD_NOT_ALLOWED = build_response_with_http_code(405, "Method Not Allowd");
+static const std::string HTTP_414_URI_TOO_LONG = build_response_with_http_code(414, "Uri Too Long");
+static const std::string HTTP_500_INTERNAL_SERVER_ERROR = build_response_with_http_code(500, "Internal Server Error");
 
 // constants.
 constexpr uint32_t HTTP_RECV_BUFFER_LEN = 8192;
 constexpr uint32_t HTTP_RECV_TIMEOUT_SEC = 5;
 constexpr uint32_t HTTP_URI_MAX_LEN = 1024;
-
-static const std::string HTTP_200_OK = http_response_msg(200, "OK");
-static const std::string HTTP_404_NOT_FOUND = http_response_msg(404, "Not Found");
-static const std::string HTTP_405_METHOD_NOT_ALLOWED = http_response_msg(405, "Method Not Allowd");
-static const std::string HTTP_414_URI_TOO_LONG = http_response_msg(414, "Uri Too Long");
-static const std::string HTTP_500_INTERNAL_SERVER_ERROR = http_response_msg(500, "Internal Server Error");
 
 static std::map<std::string, std::string> HTTP_MIME_TABLE{
     {".css" , "text/css"},
@@ -58,26 +68,39 @@ static std::map<std::string, std::string> HTTP_MIME_TABLE{
     {".xml" , "text/xml"}
 };
 
-static std::string build_last_error() {
-    auto lastErrorCode = GetLastError();   // when windows system call fails, call this immediately to save the error detail.
-    return std::system_category().message(lastErrorCode);
+static std::error_code get_last_sys_ec(){
+    return std::error_code(GetLastError(), std::system_category());
 }
 
-static void throw_last_error(const std::string& msg, const std::source_location& slc = std::source_location::current()) {
-    std::string lastError = build_last_error();
-    throw std::runtime_error{ msg + " ("s + std::to_string(slc.line()) + ") "s + lastError };
+static void print_last_sys_error(const std::string& msg, const std::source_location& slc = std::source_location::current()){
+    auto ec = get_last_sys_ec();
+    std::osyncstream(std::cerr) << std::format("{}, {}({}): {}, {}\n", slc.file_name(), slc.function_name(), slc.line(), msg, ec.message());
+}
+
+static void print_user_error(const std::string& msg, const std::source_location& slc = std::source_location::current()){
+    auto ec = get_last_sys_ec();
+    std::osyncstream(std::cerr) << std::format("{}, {}({}): {}\n", slc.file_name(), slc.function_name(), slc.line(), msg);
+}
+
+static void throw_last_sys_error(const std::string& msg, const std::source_location& slc = std::source_location::current()) {
+    auto ec = get_last_sys_ec();
+    throw std::runtime_error{ std::format("{}, {}({}): {}, {}", slc.file_name(), slc.function_name(), slc.line(), msg, ec.message()) };
+}
+
+static void throw_user_error(const std::string& msg, const std::source_location& slc = std::source_location::current()){
+    throw std::runtime_error{ std::format("{}, {}({}): {}", slc.file_name(), slc.function_name(), slc.line(), msg) };
 }
 
 static std::wstring conv_ascii_to_unicode(const std::string& str) {
     auto len = MultiByteToWideChar(CP_ACP, 0, str.c_str(), -1, nullptr, 0);
     if (len == 0) {
-        throw_last_error("conv_ascii_to_unicode() failed");
+        throw_last_sys_error("conv_ascii_to_unicode() failed");
     }
 
     std::wstring buffer(len, wchar_t{});
     len = MultiByteToWideChar(CP_ACP, 0, str.c_str(), -1, &buffer[0], len);
     if (len == 0) {
-        throw_last_error("conv_ascii_to_unicode() failed");
+        throw_last_sys_error("conv_ascii_to_unicode() failed");
     }
 
     /*
@@ -98,13 +121,13 @@ static std::wstring conv_ascii_to_unicode(const std::string& str) {
 static std::string conv_unicode_to_ascii(const std::wstring& wstr) {
     auto len = WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
     if (len == 0) {
-        throw_last_error("conv_unicode_to_ascii() failed");
+        throw_last_sys_error("conv_unicode_to_ascii() failed");
     }
 
     std::string buffer(len, char{});
 
     if (WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), -1, &buffer[0], len, nullptr, nullptr) == 0) {
-        throw_last_error("conv_unicode_to_ascii() failed");
+        throw_last_sys_error("conv_unicode_to_ascii() failed");
     }
 
     buffer.resize(len - 1);   // same reason as std::wstring conv_ascii_to_unicode(const std::string& str);
@@ -114,13 +137,13 @@ static std::string conv_unicode_to_ascii(const std::wstring& wstr) {
 static std::wstring conv_utf8_to_unicode(const std::string& str) {
     auto len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
     if (len == 0) {
-        throw_last_error("conv_utf8_to_unicode() failed");
+        throw_last_sys_error("conv_utf8_to_unicode() failed");
     }
 
     std::wstring buffer(len, wchar_t{});
     MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &buffer[0], len - 1);
     if (len == 0) {
-        throw_last_error("conv_utf8_to_unicode() failed");
+        throw_last_sys_error("conv_utf8_to_unicode() failed");
     }
 
     buffer.resize(len - 1);   // same reason as std::wstring conv_ascii_to_unicode(const std::string& str);
@@ -166,14 +189,6 @@ static std::string conv_unicode_to_utf8(const std::wstring& wstr) {
     }
 
     return result;
-}
-
-static std::string string_to_upper(std::string str) {
-    for (size_t i = 0; i < str.size(); ++i) {
-        str[i] = toupper(str[i]);
-    }
-
-    return str;
 }
 
 /*
@@ -251,7 +266,7 @@ public:
 
         WORD wVersionRequested = MAKEWORD(2, 2);
         if (WSAStartup(wVersionRequested, &wsaData) != 0) {
-            throw_last_error("WSAStartup() failed");
+            throw_last_sys_error("WSAStartup() failed");
         }
     }
 
@@ -272,15 +287,34 @@ class HttpConnection {
     std::string method;
     std::string uri;
 
+    bool string_icompare(const std::string& left, const std::string& right){
+        return std::ranges::equal(left, right, [](char c1, char c2){
+            return std::toupper(c1) == std::toupper(c2);
+        });
+    }
+
+    int hex_to_decimal(char c) {
+        if (c >= '0' && c <= '9'){
+            return c - '0';
+        }
+        else if (c >= 'a' && c <= 'z'){
+            return c - 'a' + 10;
+        }
+        else if (c >= 'A' && c <= 'Z'){
+            return c - 'A' + 10;
+        }
+
+        return -1;
+    }
+
     void uri_decode() {   // uri may contain percent-encoding(like %20), in RFC 3986
         std::string decodeUri;
         auto len = uri.size();
 
-        for (int i = 0; i < len;) {
-            if (uri[i] == '%' && i + 2 < len) {
-                std::string temp{ uri[i + 1], uri[i + 2] };
-                unsigned long num = stoul(temp, 0, 16);
-                decodeUri += static_cast<char>(num);
+        size_t i = 0;
+        while (i < len){
+            if (uri[i] == '%' && i + 2 < len){
+                decodeUri += static_cast<char>(16 * hex_to_decimal(uri[i + 1]) + hex_to_decimal(uri[i + 2]));
                 i += 3;
             }
             else {
@@ -387,7 +421,7 @@ class HttpConnection {
         }
 
         method = buf.substr(0, index);
-        if (string_to_upper(method) != "GET") {
+        if (!string_icompare("GET", method)) {
             http_response_send(HTTP_405_METHOD_NOT_ALLOWED);
             return;
         }
@@ -412,7 +446,7 @@ class HttpConnection {
             p /= conv_utf8_to_unicode(uri);   // It is necessary to use Unicode to process paths on the Windows platform.
         }
 
-        std::cout << conv_unicode_to_ascii(p.wstring()) << "\n";
+        std::osyncstream(std::cout) << conv_unicode_to_ascii(p.wstring()) << "\n";
 
         if (fs::is_directory(p)) {
             serve_dir(p);
@@ -434,44 +468,30 @@ public:
     ~HttpConnection() {
         if (sock != INVALID_SOCKET) {
             if (shutdown(sock, SD_SEND) != 0) {   // half close.
-                std::cerr << "error shutdown(), " << build_last_error() << "\n";
+                print_last_sys_error("error shutdown()");
             }
 
             if (closesocket(sock) != 0) {
-                std::cerr << "error closesocket(), " << build_last_error() << "\n";
+                print_last_sys_error("error closesocket()");
             }
         }
-    }
-
-    HttpConnection(const HttpConnection&) = delete;
-    HttpConnection& operator=(const HttpConnection&) = delete;
-
-    HttpConnection(HttpConnection&& other) noexcept : sock{ other.sock } {}
-    HttpConnection& operator=(HttpConnection&& other) noexcept {
-        if (&other != this) {
-            sock = other.sock;
-            other.sock = INVALID_SOCKET;
-        }
-
-        return *this;
     }
 
     void start() {
         // set receive time out.
         uint32_t recvTimeOut = HTTP_RECV_TIMEOUT_SEC * 1000;
         if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeOut), sizeof(recvTimeOut)) != 0) {
-            std::cerr << "setsockopt() SO_RCVTIMEO failed, " << build_last_error() << "\n";
+            print_last_sys_error("error setsockopt() on SO_RCVTIMEO");
             return;
         }
 
         auto len = recv(sock, &buf[0], HTTP_RECV_BUFFER_LEN, 0);
 
         if (len < 0) {
-            std::cerr << "recv() failed " << build_last_error() << "\n";
-            http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
+            print_last_sys_error("error recv()");
         }
         else if (len == 0) {
-            std::cerr << "Connection has been closed, nothing would do.\n";
+            print_user_error("Connection has been closed, nothing would do.\n");
         }
         else {
             analyse();
@@ -491,37 +511,37 @@ class HttpFileServer {
         auto ret = inet_pton(AF_INET, ip.c_str(), &(addr_in.sin_addr));
 
         if (ret < 0) {
-            throw_last_error("error inet_pton()");
+            throw_last_sys_error("error inet_pton()");
         }
         else if (ret == 0) {
-            throw std::runtime_error{ "given ip is not a valid IPv4 dotted-decimal string or a valid IPv6 address string\n" };
+            throw_user_error("given ip is not a valid IPv4 dotted-decimal string or a valid IPv6 address string");
         }
 
         if (bind(server, (const struct sockaddr*)(&addr_in), sizeof(struct sockaddr_in)) != 0) {
-            throw_last_error("error bind()");
+            throw_last_sys_error("error bind()");
         }
 
         if (listen(server, SOMAXCONN) != 0) {
-            throw_last_error("error listen()");
+            throw_last_sys_error("error listen()");
         }
 
         int option = 1;
         if (setsockopt(server, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&option), sizeof(option)) != 0) {
-            throw_last_error("error setsockopt() on SO_REUSEADDR");
+            throw_last_sys_error("error setsockopt() on SO_REUSEADDR");
         }
     }
 public:
     HttpFileServer() {
         server = socket(AF_INET, SOCK_STREAM, 0);
         if (server == INVALID_SOCKET) {
-            throw_last_error("error socket()");
+            throw_last_sys_error("error socket()");
         }
     }
 
     ~HttpFileServer() {
         if (server != INVALID_SOCKET) {
             if (closesocket(server) != 0) {
-                std::cerr << "error closesocket(), " << build_last_error() << "\n";
+                print_last_sys_error("error closesocket()");
             }
         }
     }
@@ -532,8 +552,7 @@ public:
         while (true) {
             SOCKET s = accept(server, nullptr, nullptr);
             if (s == INVALID_SOCKET) {
-                std::cerr << "accept() failed, " << build_last_error() << "\n";
-                return;
+                throw_last_sys_error("error accept()");
             }
 
             auto connection = std::make_shared<HttpConnection>(s, rootPath);
