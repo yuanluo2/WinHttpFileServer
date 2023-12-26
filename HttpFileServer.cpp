@@ -283,7 +283,7 @@ static WSASetup wsaSetup;
 class HttpConnection {
     SOCKET sock;
     std::wstring rootPath;
-    std::string buf;
+    std::string request;
     std::string method;
     std::string uri;
 
@@ -408,19 +408,19 @@ class HttpConnection {
         size_t index = 0;
 
         // request too large or it is not a valid http request.
-        if ((index = buf.find("\r\n\r\n")) == std::string::npos) {
+        if ((index = request.find("\r\n\r\n")) == std::string::npos) {
             http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
             return;
         }
 
         // RFC 2616: parse the first line.
         // 1st space not detected, this is not a valid http request.
-        if ((index = buf.find(" ")) == std::string::npos) {
+        if ((index = request.find(" ")) == std::string::npos) {
             http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
             return;
         }
 
-        method = buf.substr(0, index);
+        method = request.substr(0, index);
         if (!string_icompare("GET", method)) {
             http_response_send(HTTP_405_METHOD_NOT_ALLOWED);
             return;
@@ -428,12 +428,12 @@ class HttpConnection {
 
         // 2nd space not detected, this is not a valid http request.
         size_t indexBegin = index + 1;
-        if ((index = buf.find(" ", indexBegin)) == std::string::npos) {
+        if ((index = request.find(" ", indexBegin)) == std::string::npos) {
             http_response_send(HTTP_500_INTERNAL_SERVER_ERROR);
             return;
         }
 
-        uri = buf.substr(indexBegin, index - indexBegin);
+        uri = request.substr(indexBegin, index - indexBegin);
         if (uri.size() > HTTP_URI_MAX_LEN) {   // uri too long.
             http_response_send(HTTP_414_URI_TOO_LONG);
             return;
@@ -462,7 +462,7 @@ public:
     HttpConnection(SOCKET _sock, const std::string& _rootPath) :
         sock{ _sock },
         rootPath{ conv_ascii_to_unicode(_rootPath) },
-        buf(HTTP_RECV_BUFFER_LEN, char{})
+        request(HTTP_RECV_BUFFER_LEN, char{})
     {}
 
     ~HttpConnection() {
@@ -485,7 +485,7 @@ public:
             return;
         }
 
-        auto len = recv(sock, &buf[0], HTTP_RECV_BUFFER_LEN, 0);
+        auto len = recv(sock, &request[0], HTTP_RECV_BUFFER_LEN, 0);
 
         if (len < 0) {
             print_last_sys_error("error recv()");
