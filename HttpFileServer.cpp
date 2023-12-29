@@ -79,7 +79,6 @@ static void print_last_sys_error(const std::string& msg, const std::source_locat
 }
 
 static void print_user_error(const std::string& msg, const std::source_location& slc = std::source_location::current()){
-    auto ec = get_last_sys_ec();
     std::osyncstream(std::cerr) << std::format("{}, {}({}): {}\n", slc.file_name(), slc.function_name(), slc.line(), msg);
 }
 
