@@ -69,6 +69,11 @@ static std::map<std::string, std::string> HTTP_MIME_TABLE{
     {".xml" , "text/xml"}
 };
 
+/*
+    using std::error_code to get the system error, not strerror() or FormatMessage().
+	learned from asio library, thanks to Christopher Kohlhoff's articles on std::error_code:
+	http://blog.think-async.com/2010/04/system-error-support-in-c0x-part-5.html
+*/
 static std::error_code get_last_sys_ec(){
     return std::error_code(GetLastError(), std::system_category());
 }
